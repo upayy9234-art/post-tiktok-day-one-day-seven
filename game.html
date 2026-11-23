@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pocket Grove — a tiny village that grows</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #1c2b1a; height: 100%; }
+  body { display: flex; flex-direction: column; align-items: center; font-family: monospace; color: #e8f5d8; }
+  h1 { font-size: 20px; margin: 14px 0 4px; letter-spacing: 2px; }
+  p.sub { margin: 0 0 10px; font-size: 13px; color: #b9d69a; }
+  #wrap { position: relative; }
+  canvas { background: #79c25f; image-rendering: pixelated; border: 4px solid #0f1a0d; border-radius: 6px;
+           width: min(92vw, 405px); height: auto; display: block; }
+  #bar { margin: 12px 0 18px; display: flex; gap: 10px; align-items: center; }
+  button { font-family: monospace; font-size: 15px; padding: 9px 18px; border: 0; border-radius: 6px;
+           background: #ffd94a; color: #191419; cursor: pointer; font-weight: bold; }
+  button:hover { background: #ffe273; }
+  span.hint { font-size: 12px; color: #b9d69a; }
+</style>
+</head>
+<body>
+<h1>POCKET GROVE</h1>
+<p class="sub">a tiny village, day one and day seven — built by an AI agent</p>
+<div id="wrap"><canvas id="game" width="540" height="960"></canvas></div>
+<div id="bar">
+  <button id="toggle">Show Day 7 &#9654;</button>
+  <span class="hint">arrow keys / WASD move the hero &middot; he also walks his loop on his own</span>
+</div>
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Pocket Grove — one map, two moments in its life.
+// The SAME layout data drives both days: the loop path, the hero's hut, the
+// two first trees and the dirt patch never move. Day 7 only adds what a week
+// of daily updates built on top of them.
+// ---------------------------------------------------------------------------
+const W = 540, H = 960;
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+
+const LAYOUT = {
+  riverX: 462,                       // river band runs down the right edge
+  spawn: { x: 110, y: 740 },         // hero starts here on both days
+  loop: [                            // the hero's walk, identical both days
+    { x: 110, y: 740 }, { x: 110, y: 260 }, { x: 350, y: 260 },
+    { x: 350, y: 740 }, { x: 110, y: 740 }, { x: 230, y: 500 }
+  ],
+  hut: { x: 128, y: 268, w: 62, h: 50 },            // there from day one
+  firstTrees: [ { x: 66, y: 128 }, { x: 414, y: 690 } ],
+  dirtPatch: { x: 96, y: 846, w: 252, h: 78 },      // bare dirt on day one
+  // --- everything below arrives by day seven ---
+  buildings: [
+    { x: 128, y: 268, w: 62, h: 50, kind: 'hut',     name: 'Hut' },
+    { x: 238, y: 268, w: 62, h: 50, kind: 'house',   name: 'House' },
+    { x: 128, y: 428, w: 62, h: 50, kind: 'house',   name: 'House' },
+    { x: 238, y: 428, w: 62, h: 50, kind: 'bakery',  name: 'Bakery' },
+    { x: 306, y: 428, w: 56, h: 50, kind: 'smith',   name: 'Smithy' },
+    { x: 306, y: 268, w: 56, h: 50, kind: 'inn',     name: 'Inn' },
+    { x: 140, y: 612, w: 56, h: 40, kind: 'stall',   name: 'Stall' },
+    { x: 224, y: 612, w: 56, h: 40, kind: 'stall',   name: 'Stall' }
+  ],
+  well: { x: 216, y: 486, w: 30, h: 30 },
+  moreTrees: [ { x: 66, y: 128 }, { x: 414, y: 690 }, { x: 404, y: 150 },
+               { x: 60, y: 560 }, { x: 420, y: 420 }, { x: 380, y: 830 } ],
+  lanterns: [ { x: 110, y: 480 }, { x: 230, y: 260 }, { x: 350, y: 480 },
+              { x: 230, y: 740 }, { x: 110, y: 640 }, { x: 350, y: 640 } ],
+  npcs: [ 0xd94f4f, 0x9b59b6, 0x3f8fd2, 0xe67e22, 0x2ecc71, 0xf2f2f2 ]
+};
+
+let day = 1;
+const hero = { x: LAYOUT.spawn.x, y: LAYOUT.spawn.y, seg: 0, t: 0, speed: 1.6, manual: 0 };
+const keys = {};
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; });
+document.getElementById('toggle').addEventListener('click', ev => {
+  day = day === 1 ? 7 : 1;
+  ev.target.innerHTML = day === 1 ? 'Show Day 7 &#9654;' : '&#9664; Back to Day 1';
+});
+
+function hex(n) { return '#' + n.toString(16).padStart(6, '0'); }
+function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x | 0, y | 0, w | 0, h | 0); }
+function circle(x, y, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
+
+function drawTree(x, y, grown) {
+  rect(x - 3, y, 6, 14, '#7a4a21');
+  circle(x, y - 8, grown ? 17 : 13, '#2e7d32');
+  circle(x - 10, y - 2, grown ? 12 : 9, '#388e3c');
+  circle(x + 10, y - 2, grown ? 12 : 9, '#43a047');
+}
+function drawBuilding(b) {
+  rect(b.x, b.y + 14, b.w, b.h - 14, '#f3e2b8');                    // walls
+  ctx.fillStyle = b.kind === 'smith' ? '#5d4037' : '#b5522d';      // roof
+  ctx.beginPath();
+  ctx.moveTo(b.x - 5, b.y + 16); ctx.lineTo(b.x + b.w / 2, b.y - 10); ctx.lineTo(b.x + b.w + 5, b.y + 16);
+  ctx.closePath(); ctx.fill();
+  rect(b.x + b.w / 2 - 7, b.y + b.h - 22, 14, 22, '#6d4421');      // door
+  rect(b.x + 8, b.y + 24, 10, 10, '#ffe082');                      // window
+  if (b.kind === 'bakery' || b.kind === 'stall') {                 // striped awning
+    for (let i = 0; i < 6; i++) rect(b.x + i * (b.w / 6), b.y + 12, b.w / 6, 7, i % 2 ? '#ffffff' : '#d94f4f');
+  }
+  if (b.kind === 'inn') { rect(b.x + b.w - 20, b.y + 22, 12, 12, '#ffd94a'); }
+}
+function drawPerson(x, y, colour, frame) {
+  const step = Math.sin(frame / 6) > 0 ? 2 : -2;
+  rect(x - 4, y + 8, 3, 6 + step, '#37474f'); rect(x + 1, y + 8, 3, 6 - step, '#37474f'); // legs
+  rect(x - 5, y - 2, 10, 11, hex(colour));                                              // tunic
+  circle(x, y - 7, 5, '#f2c894');                                                       // head
+}
+function walkAlong(actor, path, dt) {
+  const a = path[actor.seg], b = path[(actor.seg + 1) % path.length];
+  const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+  actor.t += (actor.speed * dt) / len;
+  if (actor.t >= 1) { actor.t = 0; actor.seg = (actor.seg + 1) % path.length; }
+  const p = path[actor.seg], q = path[(actor.seg + 1) % path.length];
+  actor.x = p.x + (q.x - p.x) * actor.t; actor.y = p.y + (q.y - p.y) * actor.t;
+}
+
+const npcActors = LAYOUT.npcs.map((c, i) => ({
+  x: 0, y: 0, seg: i % (LAYOUT.loop.length - 1), t: i / LAYOUT.npcs.length,
+  speed: 0.9 + (i % 3) * 0.35, colour: c
+}));
+let frame = 0;
+
+function draw() {
+  frame++;
+  // grass, two-tone checker
+  for (let ty = 0; ty < H / 30; ty++) for (let tx = 0; tx < W / 30; tx++)
+    rect(tx * 30, ty * 30, 30, 30, (tx + ty) % 2 ? '#7cc463' : '#74ba5a');
+  // river down the right edge, with a soft bank
+  rect(LAYOUT.riverX, 0, W - LAYOUT.riverX, H, '#4aa3d8');
+  rect(LAYOUT.riverX, 0, 6, H, '#c9b083');
+  for (let y = 20 + (frame % 40); y < H; y += 80) rect(LAYOUT.riverX + 18, y, 22, 4, '#8ecdf0');
+  // the loop path (dirt) — same both days
+  ctx.strokeStyle = '#c9a86a'; ctx.lineWidth = 24; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  LAYOUT.loop.slice(0, 5).forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+  ctx.stroke();
+  // dirt patch / crop field
+  const d = LAYOUT.dirtPatch;
+  rect(d.x, d.y, d.w, d.h, '#a9805a');
+  if (day === 7) {
+    rect(d.x - 4, d.y - 4, d.w + 8, 4, '#8d6e63'); rect(d.x - 4, d.y + d.h, d.w + 8, 4, '#8d6e63');
+    for (let r = 0; r < 4; r++) for (let i = 0; i < 12; i++) {
+      const cx = d.x + 12 + i * 20, cy = d.y + 12 + r * 18;
+      circle(cx, cy, 5, r % 2 ? '#f4d03f' : '#58b368'); circle(cx, cy - 4, 3, r % 2 ? '#f7dc6f' : '#6fce7e');
+    }
+  }
+  // trees
+  (day === 7 ? LAYOUT.moreTrees : LAYOUT.firstTrees).forEach(t => drawTree(t.x, t.y, day === 7));
+  // buildings
+  if (day === 1) drawBuilding(LAYOUT.buildings[0]); else LAYOUT.buildings.forEach(drawBuilding);
+  if (day === 7) {
+    const wl = LAYOUT.well;
+    rect(wl.x, wl.y + 8, wl.w, wl.h - 8, '#9e9e9e'); circle(wl.x + wl.w / 2, wl.y + 12, 9, '#37474f');
+    rect(wl.x - 2, wl.y, 4, 12, '#6d4421'); rect(wl.x + wl.w - 2, wl.y, 4, 12, '#6d4421');
+    rect(wl.x - 4, wl.y - 4, wl.w + 8, 5, '#b5522d');
+    LAYOUT.lanterns.forEach((l, i) => {
+      rect(l.x - 1, l.y - 12, 3, 14, '#4e342e');
+      circle(l.x, l.y - 16, 4 + Math.sin(frame / 8 + i) * 0.7, '#ffd94a');
+    });
+    // a cart crossing the middle path
+    const cx = 40 + (frame * 1.1) % 380;
+    rect(cx, 492, 34, 12, '#8d6e63'); rect(cx + 4, 484, 22, 9, '#d94f4f');
+    circle(cx + 7, 508, 6, '#4e342e'); circle(cx + 27, 508, 6, '#4e342e');
+    // birds overhead
+    ctx.strokeStyle = '#37474f'; ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      const bx = (frame * 1.6 + i * 130) % (W + 80) - 40, by = 70 + i * 34;
+      ctx.beginPath(); ctx.moveTo(bx - 7, by); ctx.quadraticCurveTo(bx - 2, by - 5, bx, by);
+      ctx.quadraticCurveTo(bx + 2, by - 5, bx + 7, by); ctx.stroke();
+    }
+    npcActors.forEach(n => { walkAlong(n, LAYOUT.loop, 1); drawPerson(n.x, n.y, n.colour, frame + n.seg * 9); });
+  }
+  // the hero: arrow keys take over, otherwise he walks his loop
+  const mv = 2.2;
+  if (keys['arrowleft'] || keys['a']) hero.x -= mv; else if (keys['arrowright'] || keys['d']) hero.x += mv;
+  else if (keys['arrowup'] || keys['w']) hero.y -= mv; else if (keys['arrowdown'] || keys['s']) hero.y += mv;
+  else walkAlong(hero, LAYOUT.loop, 1);
+  hero.x = Math.max(12, Math.min(W - 12, hero.x)); hero.y = Math.max(16, Math.min(H - 10, hero.y));
+  drawPerson(hero.x, hero.y, 0x3f6fd2, frame);
+  // day banner
+  ctx.fillStyle = 'rgba(15,26,13,0.55)'; ctx.fillRect(0, 0, W, 44);
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 24px monospace'; ctx.textAlign = 'center';
+  ctx.fillText(day === 1 ? 'DAY 1' : 'DAY 7', W / 2, 31);
+  requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>
